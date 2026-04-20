@@ -1,0 +1,31 @@
+# Maven
+target/
+*.jar
+*.war
+
+# SQLite DB
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend - dependencies & build output
+frontend/node_modules/
+frontend/node/
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Environment (민감 정보)
+.env
+
+# Claude Code 프로젝트 설정
+.claude/
