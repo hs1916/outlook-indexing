@@ -143,7 +143,7 @@ PC 부팅 시 자동으로 서버가 실행되도록 Windows 시작 프로그램
 
 ```bat
 @echo off
-start "" "C:\Program Files\Java\jdk-17\bin\javaw.exe" -jar "C:\pst-search\pst-search.jar"
+start "" "C:\Program Files\Java\jdk-17\bin\javaw.exe" -Xmx4g -Xms512m -Djava.awt.headless=true -jar "C:\pst-search\pst-search.jar"
 ```
 
 > `javaw.exe` 를 사용하면 콘솔 창 없이 백그라운드로 실행된다.  
@@ -160,7 +160,7 @@ start "" "C:\Program Files\Java\jdk-17\bin\javaw.exe" -jar "C:\pst-search\pst-se
 4. **트리거** 탭: 새로 만들기 → "시작할 때" 선택
 5. **동작** 탭: 새로 만들기
    - 프로그램/스크립트: `C:\Program Files\Java\jdk-17\bin\javaw.exe`
-   - 인수 추가: `-jar "C:\pst-search\pst-search.jar"`
+   - 인수 추가: `-Xmx4g -Xms512m -Djava.awt.headless=true -jar "C:\pst-search\pst-search.jar"`
    - 시작 위치: `C:\pst-search\`
 6. **조건** 탭: "AC 전원에 연결된 경우에만 실행" 체크 해제
 7. 확인 후 관리자 암호 입력
@@ -178,7 +178,7 @@ start "" "C:\Program Files\Java\jdk-17\bin\javaw.exe" -jar "C:\pst-search\pst-se
   <name>PST 메일 검색 서버</name>
   <description>Outlook PST 인덱서 및 메일 검색 서비스</description>
   <executable>javaw</executable>
-  <arguments>-jar "%BASE%\pst-search.jar"</arguments>
+  <arguments>-Xmx4g -Xms512m -Djava.awt.headless=true -jar "%BASE%\pst-search.jar"</arguments>
   <logmode>rotate</logmode>
 </service>
 ```

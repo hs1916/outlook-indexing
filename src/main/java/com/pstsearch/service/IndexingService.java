@@ -30,18 +30,24 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class IndexingService {
 
     private static final Logger log = LoggerFactory.getLogger(IndexingService.class);
-    private static final int BATCH_SIZE = 500;
+
+    /** 배치 크기: 커밋 단위 (메모리/성능 균형) */
+    private static final int BATCH_SIZE = 200;
     private static final long SSE_TIMEOUT = 0L;
 
     private final PstFileRepository pstFileRepository;
     private final MailRepository mailRepository;
+    private final BatchSaveService batchSaveService;
 
     private final Map<Long, List<SseEmitter>> emitterMap = new ConcurrentHashMap<>();
     private final Map<Long, IndexProgressDto> progressMap = new ConcurrentHashMap<>();
 
-    public IndexingService(PstFileRepository pstFileRepository, MailRepository mailRepository) {
+    public IndexingService(PstFileRepository pstFileRepository,
+                           MailRepository mailRepository,
+                           BatchSaveService batchSaveService) {
         this.pstFileRepository = pstFileRepository;
         this.mailRepository = mailRepository;
+        this.batchSaveService = batchSaveService;
     }
 
     public SseEmitter subscribe(Long pstFileId) {
@@ -57,56 +63,56 @@ public class IndexingService {
         return emitter;
     }
 
+    /**
+     * @Transactional 제거: 이 메서드 전체를 하나의 트랜잭션으로 묶으면
+     * Hibernate 세션 캐시에 모든 엔티티가 누적되어 대용량 PST 처리 시 OOM 발생.
+     * 각 배치는 BatchSaveService.saveBatch() 가 독립 트랜잭션으로 커밋한다.
+     */
     @Async("indexingExecutor")
-    @Transactional
     public void startIndexing(Long pstFileId) {
         PstFile pstFile = pstFileRepository.findById(pstFileId)
                 .orElseThrow(() -> new NoSuchElementException("PST 파일 없음: " + pstFileId));
 
-        mailRepository.deleteByPstFileId(pstFileId);
-
-        pstFile.setStatus(IndexStatus.INDEXING);
-        pstFile.setIndexedMailCount(0);
-        pstFile.setTotalMailCount(0);
-        pstFile.setErrorCount(0);
-        pstFileRepository.save(pstFile);
+        updateStatus(pstFile, IndexStatus.INDEXING, 0, 0, 0, null);
 
         long startTime = System.currentTimeMillis();
-        AtomicInteger totalCount = new AtomicInteger(0);
+        AtomicInteger totalCount  = new AtomicInteger(0);
         AtomicInteger indexedCount = new AtomicInteger(0);
-        AtomicInteger errorCount = new AtomicInteger(0);
+        AtomicInteger errorCount  = new AtomicInteger(0);
 
+        PSTFile pst = null;
         try {
-            PSTFile pst = new PSTFile(pstFile.getFilePath());
+            // ── 1단계: 메일 수 카운트 ──────────────────────────────────
+            pst = new PSTFile(pstFile.getFilePath());
             log.info("[{}] 메일 수 계산 중...", pstFile.getFileName());
             totalCount.set(countMessages(pst.getRootFolder()));
             log.info("[{}] 총 메일 수: {}", pstFile.getFileName(), totalCount.get());
+            closePst(pst);
+            pst = null;
 
-            pstFile.setTotalMailCount(totalCount.get());
-            pstFileRepository.save(pstFile);
+            updateTotalCount(pstFile, totalCount.get());
 
-            PSTFile pst2 = new PSTFile(pstFile.getFilePath());
+            // ── 2단계: 인덱싱 ─────────────────────────────────────────
+            pst = new PSTFile(pstFile.getFilePath());
             List<Mail> batch = new ArrayList<>(BATCH_SIZE);
-            processFolder(pst2.getRootFolder(), pstFile, batch, indexedCount, errorCount, totalCount, pstFileId, startTime);
 
+            processFolder(pst.getRootFolder(), pstFile, batch,
+                    indexedCount, errorCount, totalCount, pstFileId, startTime);
+
+            // 마지막 잔여 배치 저장
             if (!batch.isEmpty()) {
-                mailRepository.saveAll(batch);
+                batchSaveService.saveBatch(batch);
                 batch.clear();
             }
 
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
-            pstFile.setStatus(IndexStatus.DONE);
-            pstFile.setIndexedMailCount(indexedCount.get());
-            pstFile.setErrorCount(errorCount.get());
-            pstFile.setElapsedSeconds((int) elapsed);
-            pstFile.setIndexedAt(LocalDateTime.now());
-            pstFileRepository.save(pstFile);
+            updateStatus(pstFile, IndexStatus.DONE,
+                    indexedCount.get(), errorCount.get(), (int) elapsed, LocalDateTime.now());
 
             IndexProgressDto done = IndexProgressDto.builder()
                     .indexedCount(indexedCount.get()).totalCount(totalCount.get())
                     .percent(100).status(IndexStatus.DONE)
                     .errorCount(errorCount.get()).elapsedSeconds((int) elapsed).build();
-
             progressMap.put(pstFileId, done);
             broadcastProgress(pstFileId, done);
             completeEmitters(pstFileId);
@@ -116,55 +122,61 @@ public class IndexingService {
 
         } catch (Exception e) {
             log.error("[{}] 인덱싱 실패: {}", pstFile.getFileName(), e.getMessage(), e);
-            pstFile.setStatus(IndexStatus.ERROR);
-            pstFileRepository.save(pstFile);
+            updateStatus(pstFile, IndexStatus.ERROR,
+                    indexedCount.get(), errorCount.get(), 0, null);
 
-            IndexProgressDto error = IndexProgressDto.builder()
+            IndexProgressDto err = IndexProgressDto.builder()
                     .indexedCount(indexedCount.get()).totalCount(totalCount.get())
                     .percent(calcPercent(indexedCount.get(), totalCount.get()))
                     .status(IndexStatus.ERROR).errorCount(errorCount.get()).build();
-
-            progressMap.put(pstFileId, error);
-            broadcastProgress(pstFileId, error);
+            progressMap.put(pstFileId, err);
+            broadcastProgress(pstFileId, err);
             completeEmitters(pstFileId);
+
+        } finally {
+            closePst(pst);
         }
     }
 
     private void processFolder(PSTFolder folder, PstFile pstFile,
-                                List<Mail> batch, AtomicInteger indexed,
-                                AtomicInteger errors, AtomicInteger total,
+                                List<Mail> batch,
+                                AtomicInteger indexed, AtomicInteger errors,
+                                AtomicInteger total,
                                 Long pstFileId, long startTime) throws Exception {
         if (folder.hasSubfolders()) {
             for (PSTFolder sub : folder.getSubFolders()) {
                 processFolder(sub, pstFile, batch, indexed, errors, total, pstFileId, startTime);
             }
         }
-        if (folder.getContentCount() > 0) {
-            PSTObject obj = folder.getNextChild();
-            while (obj != null) {
-                if (obj instanceof PSTMessage message) {
-                    try {
-                        batch.add(toMail(message, pstFile));
-                        indexed.incrementAndGet();
-                        if (batch.size() >= BATCH_SIZE) {
-                            mailRepository.saveAll(batch);
-                            batch.clear();
-                            int percent = calcPercent(indexed.get(), total.get());
-                            long elapsed = (System.currentTimeMillis() - startTime) / 1000;
-                            IndexProgressDto progress = IndexProgressDto.builder()
-                                    .indexedCount(indexed.get()).totalCount(total.get())
-                                    .percent(percent).status(IndexStatus.INDEXING)
-                                    .errorCount(errors.get()).elapsedSeconds((int) elapsed).build();
-                            progressMap.put(pstFileId, progress);
-                            broadcastProgress(pstFileId, progress);
-                        }
-                    } catch (Exception e) {
-                        errors.incrementAndGet();
-                        log.debug("메일 파싱 오류 (스킵): {}", e.getMessage());
+
+        if (folder.getContentCount() <= 0) return;
+
+        PSTObject obj = folder.getNextChild();
+        while (obj != null) {
+            if (obj instanceof PSTMessage message) {
+                try {
+                    batch.add(toMail(message, pstFile));
+                    indexed.incrementAndGet();
+
+                    if (batch.size() >= BATCH_SIZE) {
+                        batchSaveService.saveBatch(batch); // 독립 트랜잭션으로 커밋
+                        batch.clear();
+
+                        int percent = calcPercent(indexed.get(), total.get());
+                        long elapsed = (System.currentTimeMillis() - startTime) / 1000;
+                        IndexProgressDto progress = IndexProgressDto.builder()
+                                .indexedCount(indexed.get()).totalCount(total.get())
+                                .percent(percent).status(IndexStatus.INDEXING)
+                                .errorCount(errors.get()).elapsedSeconds((int) elapsed).build();
+                        progressMap.put(pstFileId, progress);
+                        broadcastProgress(pstFileId, progress);
                     }
+                } catch (Exception e) {
+                    errors.incrementAndGet();
+                    log.debug("메일 파싱 오류 (스킵): {}", e.getMessage());
                 }
-                obj = folder.getNextChild();
             }
+            obj = folder.getNextChild();
         }
     }
 
@@ -183,7 +195,6 @@ public class IndexingService {
                 String name  = r.getDisplayName();
                 if (email != null && email.isBlank()) email = null;
                 if (name  != null && name.isBlank())  name  = null;
-
                 if (emailsSb.length() > 0) { emailsSb.append(", "); namesSb.append(", "); }
                 emailsSb.append(email != null ? email : "");
                 namesSb.append(name   != null ? name  : "");
@@ -224,6 +235,44 @@ public class IndexingService {
             for (PSTFolder sub : folder.getSubFolders()) count += countMessages(sub);
         }
         return count;
+    }
+
+    // ── DB 상태 업데이트 (각각 독립 트랜잭션 — Spring Data JPA 기본 동작) ──
+
+    @Transactional
+    public void updateStatus(PstFile pstFile, IndexStatus status,
+                             int indexed, int errors, int elapsed, LocalDateTime indexedAt) {
+        mailRepository.deleteByPstFileId(pstFile.getId());
+        pstFile.setStatus(status);
+        pstFile.setIndexedMailCount(indexed);
+        pstFile.setTotalMailCount(0);
+        pstFile.setErrorCount(errors);
+        pstFile.setElapsedSeconds(elapsed);
+        pstFile.setIndexedAt(indexedAt);
+        pstFileRepository.save(pstFile);
+    }
+
+    @Transactional
+    public void updateTotalCount(PstFile pstFile, int total) {
+        pstFile.setTotalMailCount(total);
+        pstFileRepository.save(pstFile);
+    }
+
+    @Transactional
+    public void updateDone(PstFile pstFile, int indexed, int errors, int elapsed) {
+        pstFile.setStatus(IndexStatus.DONE);
+        pstFile.setIndexedMailCount(indexed);
+        pstFile.setErrorCount(errors);
+        pstFile.setElapsedSeconds(elapsed);
+        pstFile.setIndexedAt(LocalDateTime.now());
+        pstFileRepository.save(pstFile);
+    }
+
+    // ── 유틸리티 ──────────────────────────────────────────────────────────
+
+    private static void closePst(PSTFile pst) {
+        if (pst == null) return;
+        try { pst.getFileHandle().close(); } catch (Exception ignored) {}
     }
 
     private int calcPercent(int indexed, int total) {
