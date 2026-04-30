@@ -67,6 +67,7 @@ public interface MailRepository extends JpaRepository<Mail, Long> {
     java.util.Optional<Mail> findByIdWithPstFile(@Param("id") Long id);
 
     @Modifying
+    @org.springframework.transaction.annotation.Transactional
     @Query("DELETE FROM Mail m WHERE m.pstFile.id = :pstFileId")
     void deleteByPstFileId(@Param("pstFileId") Long pstFileId);
 }
