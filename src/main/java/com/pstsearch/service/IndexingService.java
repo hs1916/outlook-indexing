@@ -70,6 +70,7 @@ public class IndexingService {
      */
     @Async("indexingExecutor")
     public void startIndexing(Long pstFileId) {
+        java.util.Objects.requireNonNull(pstFileId, "pstFileId must not be null");
         PstFile pstFile = pstFileRepository.findById(pstFileId)
                 .orElseThrow(() -> new NoSuchElementException("PST 파일 없음: " + pstFileId));
 
@@ -101,7 +102,7 @@ public class IndexingService {
 
             // 마지막 잔여 배치 저장
             if (!batch.isEmpty()) {
-                batchSaveService.saveBatch(batch);
+                batchSaveService.saveBatch(batch, pstFileId);
                 batch.clear();
             }
 
@@ -159,7 +160,7 @@ public class IndexingService {
                     indexed.incrementAndGet();
 
                     if (batch.size() >= BATCH_SIZE) {
-                        batchSaveService.saveBatch(batch); // 독립 트랜잭션으로 커밋
+                        batchSaveService.saveBatch(batch, pstFileId); // 독립 트랜잭션으로 커밋
                         batch.clear();
 
                         int percent = calcPercent(indexed.get(), total.get());
