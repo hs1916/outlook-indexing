@@ -145,14 +145,28 @@ public class IndexingService {
                                 AtomicInteger total,
                                 Long pstFileId, long startTime) throws Exception {
         if (folder.hasSubfolders()) {
-            for (PSTFolder sub : folder.getSubFolders()) {
+            List<PSTFolder> subs;
+            try {
+                subs = folder.getSubFolders();
+            } catch (Exception e) {
+                log.warn("하위 폴더 탐색 스킵 (손상된 노드): {}", e.getMessage());
+                subs = Collections.emptyList();
+            }
+            for (PSTFolder sub : subs) {
                 processFolder(sub, pstFile, batch, indexed, errors, total, pstFileId, startTime);
             }
         }
 
-        if (folder.getContentCount() <= 0) return;
+        int contentCount = 0;
+        try { contentCount = folder.getContentCount(); } catch (Exception ignored) {}
+        if (contentCount <= 0) return;
 
-        PSTObject obj = folder.getNextChild();
+        PSTObject obj = null;
+        try { obj = folder.getNextChild(); } catch (Exception e) {
+            log.warn("폴더 메일 읽기 스킵 (손상된 노드): {}", e.getMessage());
+            return;
+        }
+
         while (obj != null) {
             if (obj instanceof PSTMessage message) {
                 try {
@@ -160,7 +174,7 @@ public class IndexingService {
                     indexed.incrementAndGet();
 
                     if (batch.size() >= BATCH_SIZE) {
-                        batchSaveService.saveBatch(batch, pstFileId); // 독립 트랜잭션으로 커밋
+                        batchSaveService.saveBatch(batch, pstFileId);
                         batch.clear();
 
                         int percent = calcPercent(indexed.get(), total.get());
@@ -177,7 +191,10 @@ public class IndexingService {
                     log.debug("메일 파싱 오류 (스킵): {}", e.getMessage());
                 }
             }
-            obj = folder.getNextChild();
+            try { obj = folder.getNextChild(); } catch (Exception e) {
+                log.warn("다음 메일 읽기 실패 (폴더 순회 중단): {}", e.getMessage());
+                break;
+            }
         }
     }
 
@@ -230,10 +247,17 @@ public class IndexingService {
                 .pstDescriptorId(message.getDescriptorNodeId()).build();
     }
 
-    private int countMessages(PSTFolder folder) throws Exception {
-        int count = folder.getContentCount();
+    private int countMessages(PSTFolder folder) {
+        int count = 0;
+        try { count = folder.getContentCount(); } catch (Exception ignored) {}
         if (folder.hasSubfolders()) {
-            for (PSTFolder sub : folder.getSubFolders()) count += countMessages(sub);
+            try {
+                for (PSTFolder sub : folder.getSubFolders()) {
+                    count += countMessages(sub);
+                }
+            } catch (Exception e) {
+                log.warn("폴더 하위 탐색 스킵 (손상된 노드): {}", e.getMessage());
+            }
         }
         return count;
     }
