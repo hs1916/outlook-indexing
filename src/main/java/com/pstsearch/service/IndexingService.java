@@ -16,7 +16,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.LocalDateTime;
@@ -74,7 +73,9 @@ public class IndexingService {
         PstFile pstFile = pstFileRepository.findById(pstFileId)
                 .orElseThrow(() -> new NoSuchElementException("PST 파일 없음: " + pstFileId));
 
-        updateStatus(pstFile, IndexStatus.INDEXING, 0, 0, 0, null);
+        // 기존 메일 삭제 + 상태 INDEXING으로 초기화
+        mailRepository.deleteByPstFileId(pstFileId);
+        pstFileRepository.resetStatus(pstFileId, IndexStatus.INDEXING);
 
         long startTime = System.currentTimeMillis();
         AtomicInteger totalCount  = new AtomicInteger(0);
@@ -91,7 +92,7 @@ public class IndexingService {
             closePst(pst);
             pst = null;
 
-            updateTotalCount(pstFile, totalCount.get());
+            pstFileRepository.updateTotalCount(pstFileId, totalCount.get());
 
             // ── 2단계: 인덱싱 ─────────────────────────────────────────
             pst = new PSTFile(pstFile.getFilePath());
@@ -107,7 +108,7 @@ public class IndexingService {
             }
 
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
-            updateStatus(pstFile, IndexStatus.DONE,
+            pstFileRepository.updateDone(pstFileId, IndexStatus.DONE,
                     indexedCount.get(), errorCount.get(), (int) elapsed, LocalDateTime.now());
 
             IndexProgressDto done = IndexProgressDto.builder()
@@ -123,7 +124,7 @@ public class IndexingService {
 
         } catch (Exception e) {
             log.error("[{}] 인덱싱 실패: {}", pstFile.getFileName(), e.getMessage(), e);
-            updateStatus(pstFile, IndexStatus.ERROR,
+            pstFileRepository.updateDone(pstFileId, IndexStatus.ERROR,
                     indexedCount.get(), errorCount.get(), 0, null);
 
             IndexProgressDto err = IndexProgressDto.builder()
@@ -170,26 +171,33 @@ public class IndexingService {
 
         while (obj != null) {
             if (obj instanceof PSTMessage message) {
+                // ① 메일 파싱만 try-catch — 개별 메일 오류는 스킵
+                Mail mail = null;
                 try {
-                    batch.add(toMail(message, pstFile));
-                    indexed.incrementAndGet();
-
-                    if (batch.size() >= BATCH_SIZE) {
-                        batchSaveService.saveBatch(batch, pstFileId);
-                        batch.clear();
-
-                        int percent = calcPercent(indexed.get(), total.get());
-                        long elapsed = (System.currentTimeMillis() - startTime) / 1000;
-                        IndexProgressDto progress = IndexProgressDto.builder()
-                                .indexedCount(indexed.get()).totalCount(total.get())
-                                .percent(percent).status(IndexStatus.INDEXING)
-                                .errorCount(errors.get()).elapsedSeconds((int) elapsed).build();
-                        progressMap.put(pstFileId, progress);
-                        broadcastProgress(pstFileId, progress);
-                    }
+                    mail = toMail(message, pstFile);
                 } catch (Exception e) {
                     errors.incrementAndGet();
-                    log.debug("메일 파싱 오류 (스킵): {}", e.getMessage());
+                    log.warn("메일 파싱 오류 (스킵): {}", e.getMessage());
+                }
+
+                if (mail != null) {
+                    batch.add(mail);
+                    indexed.incrementAndGet();
+                }
+
+                // ② 배치 저장은 try-catch 밖 — DB 오류는 상위로 전파하여 인덱싱 실패 처리
+                if (batch.size() >= BATCH_SIZE) {
+                    batchSaveService.saveBatch(batch, pstFileId);
+                    batch.clear();
+
+                    int percent = calcPercent(indexed.get(), total.get());
+                    long elapsed = (System.currentTimeMillis() - startTime) / 1000;
+                    IndexProgressDto progress = IndexProgressDto.builder()
+                            .indexedCount(indexed.get()).totalCount(total.get())
+                            .percent(percent).status(IndexStatus.INDEXING)
+                            .errorCount(errors.get()).elapsedSeconds((int) elapsed).build();
+                    progressMap.put(pstFileId, progress);
+                    broadcastProgress(pstFileId, progress);
                 }
             }
             try { obj = folder.getNextChild(); } catch (Exception e) {
@@ -261,37 +269,6 @@ public class IndexingService {
             }
         }
         return count;
-    }
-
-    // ── DB 상태 업데이트 (각각 독립 트랜잭션 — Spring Data JPA 기본 동작) ──
-
-    @Transactional
-    public void updateStatus(PstFile pstFile, IndexStatus status,
-                             int indexed, int errors, int elapsed, LocalDateTime indexedAt) {
-        mailRepository.deleteByPstFileId(pstFile.getId());
-        pstFile.setStatus(status);
-        pstFile.setIndexedMailCount(indexed);
-        pstFile.setTotalMailCount(0);
-        pstFile.setErrorCount(errors);
-        pstFile.setElapsedSeconds(elapsed);
-        pstFile.setIndexedAt(indexedAt);
-        pstFileRepository.save(pstFile);
-    }
-
-    @Transactional
-    public void updateTotalCount(PstFile pstFile, int total) {
-        pstFile.setTotalMailCount(total);
-        pstFileRepository.save(pstFile);
-    }
-
-    @Transactional
-    public void updateDone(PstFile pstFile, int indexed, int errors, int elapsed) {
-        pstFile.setStatus(IndexStatus.DONE);
-        pstFile.setIndexedMailCount(indexed);
-        pstFile.setErrorCount(errors);
-        pstFile.setElapsedSeconds(elapsed);
-        pstFile.setIndexedAt(LocalDateTime.now());
-        pstFileRepository.save(pstFile);
     }
 
     // ── 유틸리티 ──────────────────────────────────────────────────────────

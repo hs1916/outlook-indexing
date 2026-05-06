@@ -6,10 +6,11 @@ spring:
     url: jdbc:sqlite:${DB_PATH:./pst-search.db}
     driver-class-name: org.sqlite.JDBC
     hikari:
-      maximum-pool-size: 1
+      maximum-pool-size: 2
       connection-init-sql: "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;"
   jpa:
     database-platform: org.hibernate.community.dialect.SQLiteDialect
+    open-in-view: false
     hibernate:
       ddl-auto: update
     show-sql: false
