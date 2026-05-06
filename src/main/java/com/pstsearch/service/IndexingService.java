@@ -149,7 +149,8 @@ public class IndexingService {
             try {
                 subs = folder.getSubFolders();
             } catch (Exception e) {
-                log.warn("하위 폴더 탐색 스킵 (손상된 노드): {}", e.getMessage());
+                // java-libpst 1.0.1 한계: 하위 폴더 수가 많거나 대용량 PST에서 내부 노드 테이블 파싱 실패
+                log.warn("하위 폴더 탐색 스킵 (java-libpst 파싱 한계 — 해당 폴더만 건너뜀): {}", e.getMessage());
                 subs = Collections.emptyList();
             }
             for (PSTFolder sub : subs) {
@@ -163,7 +164,7 @@ public class IndexingService {
 
         PSTObject obj = null;
         try { obj = folder.getNextChild(); } catch (Exception e) {
-            log.warn("폴더 메일 읽기 스킵 (손상된 노드): {}", e.getMessage());
+            log.warn("폴더 메일 읽기 스킵 (java-libpst 파싱 한계 — 해당 폴더만 건너뜀): {}", e.getMessage());
             return;
         }
 
@@ -256,7 +257,7 @@ public class IndexingService {
                     count += countMessages(sub);
                 }
             } catch (Exception e) {
-                log.warn("폴더 하위 탐색 스킵 (손상된 노드): {}", e.getMessage());
+                log.warn("폴더 하위 탐색 스킵 (java-libpst 파싱 한계 — 해당 폴더만 건너뜀): {}", e.getMessage());
             }
         }
         return count;
