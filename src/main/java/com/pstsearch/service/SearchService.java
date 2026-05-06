@@ -5,6 +5,7 @@ import com.pstsearch.dto.SearchRequestDto;
 import com.pstsearch.dto.SearchResultDto;
 import com.pstsearch.entity.Mail;
 import com.pstsearch.repository.MailRepository;
+import com.pstsearch.repository.MailSpec;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
@@ -24,13 +25,7 @@ public class SearchService {
 
     @Transactional(readOnly = true)
     public Page<SearchResultDto> search(SearchRequestDto req, Pageable pageable) {
-        Page<Mail> mails = mailRepository.search(
-                req.getSubjectOrNull(), req.getBodyOrNull(),
-                req.getSenderEmailOrNull(), req.getSenderNameOrNull(),
-                req.getRecipientEmailOrNull(), req.getRecipientNameOrNull(),
-                req.getDateFromDateTime(), req.getDateToDateTime(),
-                req.getAttachmentOrNull(), pageable);
-
+        Page<Mail> mails = mailRepository.findAll(MailSpec.of(req), pageable);
         return new PageImpl<>(
                 mails.getContent().stream().map(SearchResultDto::from).toList(),
                 pageable, mails.getTotalElements());

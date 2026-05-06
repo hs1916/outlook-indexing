@@ -3,6 +3,8 @@ package com.pstsearch.controller;
 import com.pstsearch.dto.SearchRequestDto;
 import com.pstsearch.entity.Mail;
 import com.pstsearch.repository.MailRepository;
+import com.pstsearch.repository.MailSpec;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -29,17 +31,13 @@ public class ExportController {
         this.mailRepository = mailRepository;
     }
 
-    /** 검색조건에 맞는 모든 메일 본문을 TXT 파일로 내보내기 */
     @GetMapping("/mails/text")
     @Transactional(readOnly = true)
     public ResponseEntity<StreamingResponseBody> exportText(SearchRequestDto req) {
 
-        List<Mail> mails = mailRepository.searchAll(
-                req.getSubjectOrNull(), req.getBodyOrNull(),
-                req.getSenderEmailOrNull(), req.getSenderNameOrNull(),
-                req.getRecipientEmailOrNull(), req.getRecipientNameOrNull(),
-                req.getDateFromDateTime(), req.getDateToDateTime(),
-                req.getAttachmentOrNull());
+        List<Mail> mails = mailRepository.findAll(
+                MailSpec.of(req),
+                Sort.by(Sort.Direction.DESC, "sentDate"));
 
         StreamingResponseBody body = out -> {
             PrintWriter writer = new PrintWriter(out, true, StandardCharsets.UTF_8);
