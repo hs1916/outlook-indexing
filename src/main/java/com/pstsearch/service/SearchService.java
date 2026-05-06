@@ -7,7 +7,6 @@ import com.pstsearch.entity.Mail;
 import com.pstsearch.repository.MailRepository;
 import com.pstsearch.repository.MailSpec;
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,10 +24,8 @@ public class SearchService {
 
     @Transactional(readOnly = true)
     public Page<SearchResultDto> search(SearchRequestDto req, Pageable pageable) {
-        Page<Mail> mails = mailRepository.findAll(MailSpec.of(req), pageable);
-        return new PageImpl<>(
-                mails.getContent().stream().map(SearchResultDto::from).toList(),
-                pageable, mails.getTotalElements());
+        return mailRepository.findAll(MailSpec.of(req), pageable)
+                .map(SearchResultDto::from);
     }
 
     @Transactional(readOnly = true)
